@@ -245,8 +245,57 @@
   <div class="footer-note" id="footerNote"><span class="pulse-dot"></span>Atualiza sozinho pra todo mundo ver</div>
 </div>
 
+<!-- =====================================================================
+     FIREBASE SDK (via CDN, sem build/npm — funciona direto no
+     GitHub Pages, Vercel ou qualquer hospedagem estática)
+===================================================================== -->
+<script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore-compat.js"></script>
+
 <script>
-  const STORAGE_KEY = 'banheiro-status';
+  /* =====================================================================
+     1) CONFIGURAÇÃO DO FIREBASE
+     ---------------------------------------------------------------------
+     Troque os valores abaixo pelos do SEU projeto Firebase.
+     Onde pegar:
+       1. Acesse https://console.firebase.google.com
+       2. Crie um projeto (ou use um existente)
+       3. Vá em "Firestore Database" > "Criar banco de dados"
+          (pode começar em modo de teste)
+       4. Vá em Configurações do projeto (ícone de engrenagem) >
+          "Seus apps" > ícone "</>" (Web) > registre o app
+       5. Copie o objeto firebaseConfig que aparece e cole aqui embaixo
+  ===================================================================== */
+  const firebaseConfig = {
+    apiKey: "AIzaSyDE6tSbLm8E5gV3d_RQh7IB5fWbTLUHvo8",
+    authDomain: "bathroom-status-97eb4.firebaseapp.com",
+    projectId: "bathroom-status-97eb4",
+    storageBucket: "bathroom-status-97eb4.firebasestorage.app",
+    messagingSenderId: "488629790296",
+    appId: "1:488629790296:web:33cdc382106bf2955d0c2d"
+  };
+
+  /* =====================================================================
+     2) INICIALIZAÇÃO
+  ===================================================================== */
+  let db = null;
+  let firebaseReady = false;
+
+  try {
+    firebase.initializeApp(firebaseConfig);
+    db = firebase.firestore();
+    firebaseReady = true;
+  } catch (e) {
+    console.error('Erro ao inicializar o Firebase:', e);
+  }
+
+  // Documento único no Firestore que guarda o status do banheiro.
+  // Coleção "banheiro" > documento "status"
+  const statusRef = firebaseReady ? db.collection('banheiro').doc('status') : null;
+
+  /* =====================================================================
+     3) ELEMENTOS DA TELA
+  ===================================================================== */
   const tag = document.getElementById('tag');
   const tagIcon = document.getElementById('tagIcon');
   const tagStatus = document.getElementById('tagStatus');
@@ -254,9 +303,13 @@
   const actionBtn = document.getElementById('actionBtn');
   const footerNote = document.getElementById('footerNote');
 
-  let currentState = null; // { occupied: bool, since: number }
+  let currentState = null; // { occupied: bool, since: number(ms) }
   let tickInterval = null;
+  let unsubscribeSnapshot = null;
 
+  /* =====================================================================
+     4) FUNÇÕES DE APOIO (tempo e mensagens)
+  ===================================================================== */
   function timeAgo(ms) {
     const diff = Math.max(0, Date.now() - ms);
     const mins = Math.floor(diff / 60000);
@@ -266,6 +319,19 @@
     return `há ${mins} min`;
   }
 
+  function showError(msg) {
+    footerNote.textContent = msg;
+    footerNote.style.color = 'var(--occupied-color)';
+  }
+
+  function clearFooter() {
+    footerNote.style.color = '';
+    footerNote.innerHTML = '<span class="pulse-dot"></span>Atualiza sozinho pra todo mundo ver';
+  }
+
+  /* =====================================================================
+     5) RENDERIZAÇÃO NA TELA
+  ===================================================================== */
   function render() {
     if (!currentState) return;
     const { occupied, since } = currentState;
@@ -294,56 +360,83 @@
     }, 1000);
   }
 
-  async function loadState() {
-    try {
-      const result = await window.storage.get(STORAGE_KEY, true);
-      currentState = result ? JSON.parse(result.value) : { occupied: false, since: Date.now() };
-    } catch (e) {
-      currentState = { occupied: false, since: Date.now() };
+  /* =====================================================================
+     6) TEMPO REAL COM onSnapshot
+     ---------------------------------------------------------------------
+     Assim que qualquer pessoa mudar o status, o Firestore avisa
+     TODOS os navegadores conectados automaticamente, sem precisar
+     recarregar a página nem ficar perguntando (polling) pro servidor.
+  ===================================================================== */
+  function listenToStatus() {
+    if (!statusRef) {
+      showError('Firebase não configurado. Edite firebaseConfig no código.');
+      actionBtn.textContent = 'Indisponível';
+      return;
     }
-    render();
+
+    unsubscribeSnapshot = statusRef.onSnapshot(
+      (doc) => {
+        if (doc.exists) {
+          currentState = doc.data();
+        } else {
+          // Ainda não existe nenhum registro -> cria o estado inicial "livre"
+          currentState = { occupied: false, since: Date.now() };
+          statusRef.set(currentState).catch((e) => {
+            console.error('Erro ao criar documento inicial no Firestore:', e);
+            showError('Não consegui criar o registro inicial no banco.');
+          });
+        }
+        render();
+        clearFooter();
+      },
+      (error) => {
+        // Erros comuns aqui: regras do Firestore bloqueando leitura,
+        // projectId errado, ou sem internet.
+        console.error('Erro ao escutar o Firestore:', error);
+        showError('Sem conexão com o banco de dados. Verifica sua internet.');
+      }
+    );
   }
 
+  /* =====================================================================
+     7) AÇÃO DO BOTÃO ("Estou usando" / "Liberar")
+  ===================================================================== */
   async function toggleState() {
+    if (!statusRef || !currentState) return;
+
     actionBtn.disabled = true;
-    const willBeOccupied = !(currentState && currentState.occupied);
+    const willBeOccupied = !currentState.occupied;
     const newState = { occupied: willBeOccupied, since: Date.now() };
+
     try {
-      const result = await window.storage.set(STORAGE_KEY, JSON.stringify(newState), true);
-      if (!result) throw new Error('Falha ao salvar');
-      currentState = newState;
+      await statusRef.set(newState);
+      // Não precisamos atualizar currentState/render aqui: o onSnapshot
+      // acima já vai receber essa mudança e atualizar a tela sozinho,
+      // igual em todos os outros navegadores conectados.
+
       tag.classList.remove('swing');
-      void tag.offsetWidth; // reflow to restart animation
+      void tag.offsetWidth; // reflow pra reiniciar a animação
       tag.style.setProperty('--rest', willBeOccupied ? '-2deg' : '2deg');
       tag.classList.add('swing');
-      render();
+
       footerNote.innerHTML = '<span class="pulse-dot"></span>Atualizado!';
-      setTimeout(() => {
-        footerNote.innerHTML = '<span class="pulse-dot"></span>Atualiza sozinho pra todo mundo ver';
-      }, 2000);
+      setTimeout(clearFooter, 2000);
     } catch (e) {
-      footerNote.textContent = 'Ops, não deu pra salvar. Tenta de novo.';
+      // Erros comuns aqui: regras do Firestore bloqueando escrita,
+      // ou sem internet.
+      console.error('Erro ao salvar no Firestore:', e);
+      showError('Ops, não deu pra salvar. Tenta de novo.');
       actionBtn.disabled = false;
     }
   }
 
-  async function poll() {
-    try {
-      const result = await window.storage.get(STORAGE_KEY, true);
-      const remoteState = result ? JSON.parse(result.value) : { occupied: false, since: Date.now() };
-      if (!currentState || remoteState.occupied !== currentState.occupied || remoteState.since !== currentState.since) {
-        currentState = remoteState;
-        render();
-      }
-    } catch (e) {
-      // silent fail, keep last known state
-    }
-  }
-
+  /* =====================================================================
+     8) INICIALIZAÇÃO DA PÁGINA
+  ===================================================================== */
   actionBtn.addEventListener('click', toggleState);
 
-  loadState().then(startTicker);
-  setInterval(poll, 3000);
+  listenToStatus();
+  startTicker();
 </script>
 
 </body>
